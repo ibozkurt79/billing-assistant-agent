@@ -1,0 +1,16 @@
+# Secrets and local config
+.env
+
+# ADK local state (session databases, eval run history)
+.adk/
+
+# Python / test caches
+__pycache__/
+.pytest_cache/
+.venv*/
+
+# OS files
+.DS_Store
+
+# Old backup copies
+*_backup_*.py

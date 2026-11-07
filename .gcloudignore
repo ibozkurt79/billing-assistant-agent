@@ -1,0 +1,9 @@
+.env
+.adk/
+.pytest_cache/
+__pycache__/
+.DS_Store
+*_backup_*.py
+*.evalset.json
+test_*.py
+.venv*/

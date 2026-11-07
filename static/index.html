@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Billing Help</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f5f5f5; color: #111;
+           display: flex; flex-direction: column; height: 100vh; }
+    header { background: #111; color: #fff; padding: 14px 20px; display: flex;
+             justify-content: space-between; align-items: center; }
+    header h1 { font-size: 18px; margin: 0; }
+    header button { background: none; color: #fff; border: 1px solid #666; border-radius: 6px;
+                    padding: 6px 12px; cursor: pointer; }
+    #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px;
+                max-width: 760px; width: 100%; margin: 0 auto; }
+    .msg { padding: 10px 14px; border-radius: 12px; max-width: 85%; line-height: 1.45; }
+    .user { background: #d52b1e; color: #fff; align-self: flex-end; }
+    .bot { background: #fff; border: 1px solid #ddd; align-self: flex-start; }
+    .bot a { color: #0a58ca; }
+    .pending { color: #777; font-style: italic; }
+    form { display: flex; gap: 8px; padding: 14px; max-width: 760px; width: 100%; margin: 0 auto; }
+    input { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; }
+    form button { padding: 12px 18px; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }
+    button:disabled, input:disabled { opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Billing Help Assistant</h1>
+    <button id="new-chat">New chat</button>
+  </header>
+
+  <main id="messages">
+    <div class="msg bot">Hi! Ask me about bills, fees, autopay, plan changes, or disputes.</div>
+  </main>
+
+  <form id="chat-form">
+    <input id="input" placeholder="Type your question..." autocomplete="off" required>
+    <button id="send" type="submit">Send</button>
+  </form>
+
+  <script>
+    const APP = "billing_assistant";
+    const messages = document.getElementById("messages");
+    const form = document.getElementById("chat-form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+
+    // Temporary identity until B2 replaces it with the verified Identity Platform uid.
+    function getUserId() {
+      try {
+        let id = localStorage.getItem("billing_user_id");
+        if (!id) {
+          id = "web-" + crypto.randomUUID();
+          localStorage.setItem("billing_user_id", id);
+        }
+        return id;
+      } catch {
+        return "web-" + crypto.randomUUID();
+      }
+    }
+    const userId = getUserId();
+    let sessionId = null;
+
+    async function ensureSession() {
+      if (sessionId) return sessionId;
+      const r = await fetch(`/apps/${APP}/users/${encodeURIComponent(userId)}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!r.ok) throw new Error(`create session failed: ${r.status}`);
+      sessionId = (await r.json()).id;
+      return sessionId;
+    }
+
+    // Escape everything first, then allow only [text](https://...) links, **bold**, and line breaks.
+    function render(text) {
+      const safe = text.replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      return safe
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                 '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\n/g, "<br>");
+    }
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.textContent = text;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+      return div;
+    }
+
+    async function send(text) {
+      addMessage("user", text);
+      const bot = addMessage("bot", "Thinking...");
+      bot.classList.add("pending");
+      input.disabled = sendBtn.disabled = true;
+      let answer = "";
+
+      try {
+        await ensureSession();
+        const r = await fetch("/run_sse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            appName: APP,
+            userId,
+            sessionId,
+            newMessage: { role: "user", parts: [{ text }] },
+            streaming: true,
+          }),
+        });
+        if (!r.ok) throw new Error(`run failed: ${r.status}`);
+
+        // Read the SSE stream: events are separated by a blank line, each line starts with "data:"
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop();               // last piece may be incomplete; keep it
+          for (const chunk of chunks) {
+            for (const line of chunk.split("\n")) {
+              if (!line.startsWith("data:")) continue;
+              const event = JSON.parse(line.slice(5));
+              if (event.error) throw new Error(event.error);
+              const t = (event.content?.parts || [])
+                .filter(p => p.text && !p.thought)  // skip tool calls and model "thoughts"
+                .map(p => p.text).join("");
+              if (!t) continue;
+              answer = event.partial ? answer + t : t;  // partial = chunk; final = full text
+              bot.classList.remove("pending");
+              bot.innerHTML = render(answer);
+              messages.scrollTop = messages.scrollHeight;
+            }
+          }
+        }
+        if (!answer) throw new Error("empty response");
+      } catch (err) {
+        console.error(err);
+        bot.classList.remove("pending");
+        bot.textContent = "Sorry, something went wrong. Please try again.";
+      } finally {
+        input.disabled = sendBtn.disabled = false;
+        input.focus();
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      send(text); 
+    });
+
+    document.getElementById("new-chat").addEventListener("click", () => {
+      sessionId = null;
+      messages.innerHTML = "";
+      addMessage("bot", "New chat started. How can I help?");
+    });
+  </script>
+</body>
+</html>

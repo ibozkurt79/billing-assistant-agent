@@ -12,6 +12,11 @@ from pathlib import Path
 import numpy as np
 from google import genai
 
+from datetime import date, timedelta
+from decimal import Decimal
+
+from google.adk.tools import ToolContext
+
 EMBED_MODEL = "gemini-embedding-001"     # must match build_index.py
 TOP_K = 3                                # how many chunks to return
 
@@ -150,12 +155,97 @@ def calculate_late_fee(past_due_balance_usd: float) -> dict:
         "note": "This is the maximum. The actual fee depends on what the state of the billing address allows.",
     }
 
+# ---------- Customer bills (structured data) ----------
+
+BILL_COLUMNS = (
+    "bill_month, statement_date, due_date, plan_charges, device_payments, "
+    "taxes_and_fees, late_fee, credits, total_due, amount_paid, status"
+)
+
+
+def _serialize(value):
+    """Decimal → "10.00", date → "2026-09-01", recurse into dicts/lists; tools must return JSON-friendly values."""
+    if isinstance(value, dict):
+        return {k: _serialize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize(v) for v in value]
+    if isinstance(value, Decimal):
+        return format(value, ".2f")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def query_bills(customer_id: str, limit: int) -> list[dict]:
+    """Blocking BigQuery call. customer_id is a query PARAMETER, never pasted into the SQL."""
+    table = f"{os.environ['GOOGLE_CLOUD_PROJECT']}.billing_data.bills"   # from config, not user input
+    sql = f"""
+        SELECT {BILL_COLUMNS}
+        FROM `{table}`
+        WHERE customer_id = @uid
+        ORDER BY bill_month DESC
+        LIMIT @limit
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("uid", "STRING", customer_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ])
+    rows = get_bq().query(sql, job_config=job_config).result()
+    return [dict(row) for row in rows]          # raw Decimals/dates; tools serialize after computing
+
+DIFF_FIELDS = ("plan_charges", "device_payments", "taxes_and_fees", "late_fee", "credits", "total_due")
+
+def _previous_month(d: date) -> date:
+    """First day of the month before d (bill_month is always the 1st)."""
+    return (d.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+def add_month_over_month(rows: list[dict]) -> list[dict]:
+    """rows: newest first. Adds each bill's change vs the bill before it (exact Decimal math).
+    Positive = higher than the previous month. The oldest row has no previous month → None."""
+    for i, row in enumerate(rows):
+        prev = rows[i + 1] if i + 1 < len(rows) else None
+        if prev is None or prev["bill_month"] != _previous_month(row["bill_month"]):
+            row["change_from_previous_month"] = None      # no bill for the month before → no comparison
+            row["compared_with_month"] = None
+            continue
+        row["compared_with_month"] = prev["bill_month"]
+        row["change_from_previous_month"] = {
+            f: (row[f] or Decimal(0)) - (prev[f] or Decimal(0)) for f in DIFF_FIELDS
+        }
+    return rows
+
+async def get_recent_bill(tool_context: ToolContext) -> dict:
+    """Returns the signed-in customer's most recent bill: charge breakdown, total due,
+    amount paid, status, due date, and change_from_previous_month (positive = higher).
+
+    Use for questions like "what's my bill", "how much do I owe", "when is my payment due",
+    "why is my bill higher this month". The customer is identified automatically.
+    """
+    rows = await asyncio.to_thread(query_bills, tool_context.user_id, 2)
+    if not rows:
+        return {"found": False, "message": "No bills found for this customer."}
+    return {"found": True, "bill": _serialize(add_month_over_month(rows)[0])}
+
+
+async def get_bill_history(months: int, tool_context: ToolContext) -> dict:
+    """Returns the signed-in customer's recent bills, newest first. Each bill includes
+    change_from_previous_month: the exact difference per charge vs the month before
+    (positive = higher). Use it to explain why a bill went up or down.
+
+    Args:
+        months: How many recent bills to return, from 1 to 12.
+    """
+    months = max(1, min(int(months), 12))
+    rows = await asyncio.to_thread(query_bills, tool_context.user_id, months + 1)  # +1 = baseline for the oldest
+    bills = add_month_over_month(rows)[:months]
+    return {"count": len(bills), "bills": _serialize(bills)}
+
 root_agent = Agent(
     name="billing_assistant",
     model=MODEL,
     description="Answers customer questions about bills, fees, plans and disputes.",
     instruction=(
-        "Answer billing questions using search_billing_docs. Answer only from the returned passages. "
+        "For billing policy questions, use search_billing_docs and answer only from the returned passages. "
         "For each passage you use, include its citation exactly as given, with no extra brackets or changes. " 
         "If nothing relevant is found, say you don't have that information. "
         "If search_billing_docs returns low_confidence true, say you don't have "
@@ -166,9 +256,23 @@ root_agent = Agent(
         "Never do fee arithmetic yourself. "
         "Explain that the result is the maximum and depends on state law. "
         "When giving a fee amount, also cite the Late payment fee section. "
-        "If the customer asks for a fee, price or amount that the passages do not state, "
-        "start by saying the documents don't include that amount. Do not answer yes or no."
+        "If the customer asks for a general fee, price or amount that neither the passages "
+        "nor the bill tools provide, start by saying the documents don't include that amount. "
+        "Do not answer yes or no. "
+        "For questions about the customer's own bill, amount due, due date, or payment history, "
+        "call get_recent_bill or get_bill_history. The tools already know who the customer is: "
+        "never ask for or accept an account number, customer ID, or another person's name. "
+        "If asked about someone else's bill, say you can only access the signed-in customer's account. "
+        "Report amounts exactly as the tools return them and do not recompute totals. "
+        "When a bill or a change between bills includes a late fee, credit, or other charge, "
+        "call search_billing_docs in the same step as the bill tool, and explain the charge with its citation. "
+        "When asked why a bill was higher or lower, use that bill's change_from_previous_month "
+        "and compared_with_month from the tools; never compute differences yourself. "
+        "Compare with the previous month unless the customer names another month. "
+        "If change_from_previous_month is null, say there is no bill for the previous month to compare with. "
+        "When reporting a bill, state the total, whether it is paid or unpaid, the due date, "
+        "and list each charge. "
     ),
     after_model_callback=add_citation_links,
-    tools=[search_billing_docs, calculate_late_fee],
+    tools=[search_billing_docs, calculate_late_fee, get_recent_bill, get_bill_history],
 )

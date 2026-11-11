@@ -24,49 +24,120 @@
     input { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; }
     form button { padding: 12px 18px; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }
     button:disabled, input:disabled { opacity: 0.5; }
+    [hidden] { display: none !important; }
+    #chat-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    #login-view { flex: 1; display: flex; align-items: center; justify-content: center; }
+    #login-form { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 24px;
+                  width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 10px; }
+    #login-form h2 { margin: 0 0 6px; font-size: 20px; }
+    #login-form button { padding: 12px; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }
+    .error { color: #d52b1e; font-size: 14px; min-height: 1em; margin: 0; }
+    #user-email { font-size: 13px; color: #bbb; margin-right: 10px; }
   </style>
 </head>
 <body>
   <header>
     <h1>Billing Help Assistant</h1>
-    <button id="new-chat">New chat</button>
+    <div>
+      <span id="user-email"></span>
+      <button id="new-chat" hidden>New chat</button>
+      <button id="sign-out" hidden>Sign out</button>
+    </div>
   </header>
 
-  <main id="messages">
-    <div class="msg bot">Hi! Ask me about bills, fees, autopay, plan changes, or disputes.</div>
-  </main>
+  <section id="login-view">
+    <form id="login-form">
+      <h2>Sign in</h2>
+      <input id="email" type="email" placeholder="Email" autocomplete="username" required>
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
 
-  <form id="chat-form">
-    <input id="input" placeholder="Type your question..." autocomplete="off" required>
-    <button id="send" type="submit">Send</button>
-  </form>
+  <div id="chat-view" hidden>
+    <main id="messages"></main>
+    <form id="chat-form">
+      <input id="input" placeholder="Type your question..." autocomplete="off" required>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </div>
 
-  <script>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    // Public config (identifies the project; not a secret)
+    const firebaseConfig = {
+      apiKey: "AIzaSyBiSY3i6vcUZQx1WXTZgiifEhBc9epbG1Y",
+      authDomain: "gen-lang-client-0223243806.firebaseapp.com",
+    };
+    const auth = getAuth(initializeApp(firebaseConfig));
+
     const APP = "billing_assistant";
     const messages = document.getElementById("messages");
     const form = document.getElementById("chat-form");
     const input = document.getElementById("input");
     const sendBtn = document.getElementById("send");
+    const loginView = document.getElementById("login-view");
+    const chatView = document.getElementById("chat-view");
+    const loginForm = document.getElementById("login-form");
+    const loginError = document.getElementById("login-error");
+    const signOutBtn = document.getElementById("sign-out");
+    const newChatBtn = document.getElementById("new-chat");
+    const userEmail = document.getElementById("user-email");
 
-    // Temporary identity until B2 replaces it with the verified Identity Platform uid.
-    function getUserId() {
-      try {
-        let id = localStorage.getItem("billing_user_id");
-        if (!id) {
-          id = "web-" + crypto.randomUUID();
-          localStorage.setItem("billing_user_id", id);
-        }
-        return id;
-      } catch {
-        return "web-" + crypto.randomUUID();
-      }
-    }
-    const userId = getUserId();
+    let userId = null;     // set from the verified Firebase user, never typed by the user
     let sessionId = null;
+
+    // Every API call goes through here: attaches a fresh ID token
+    async function authFetch(url, options = {}) {
+      const token = await auth.currentUser.getIdToken();   // auto-refreshes near expiry
+      const r = await fetch(url, {
+        ...options,
+        headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+      });
+      if (r.status === 401) await signOut(auth);           // token rejected → back to login
+      return r;
+    }
+
+    // Single place that switches between login and chat
+    onAuthStateChanged(auth, (user) => {
+      const signedIn = Boolean(user);
+      loginView.hidden = signedIn;
+      chatView.hidden = !signedIn;
+      signOutBtn.hidden = !signedIn;
+      newChatBtn.hidden = !signedIn;
+      userEmail.textContent = signedIn ? user.email : "";
+      userId = signedIn ? user.uid : null;
+      sessionId = null;
+      messages.innerHTML = "";
+      if (signedIn) {
+        addMessage("bot", "Hi! Ask me about bills, fees, autopay, plan changes, or disputes.");
+        input.focus();
+      }
+    });
+
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      loginError.textContent = "";
+      try {
+        await signInWithEmailAndPassword(auth,
+          document.getElementById("email").value,
+          document.getElementById("password").value);
+        loginForm.reset();
+      } catch (err) {
+        console.error(err);
+        loginError.textContent = "Sign-in failed. Check your email and password.";
+      }
+    });
+
+    signOutBtn.addEventListener("click", () => signOut(auth));
 
     async function ensureSession() {
       if (sessionId) return sessionId;
-      const r = await fetch(`/apps/${APP}/users/${encodeURIComponent(userId)}/sessions`, {
+      const r = await authFetch(`/apps/${APP}/users/${encodeURIComponent(userId)}/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
@@ -105,7 +176,7 @@
 
       try {
         await ensureSession();
-        const r = await fetch("/run_sse", {
+        const r = await authFetch("/run_sse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -163,7 +234,7 @@
       send(text); 
     });
 
-    document.getElementById("new-chat").addEventListener("click", () => {
+    newChatBtn.addEventListener("click", () => {
       sessionId = null;
       messages.innerHTML = "";
       addMessage("bot", "New chat started. How can I help?");

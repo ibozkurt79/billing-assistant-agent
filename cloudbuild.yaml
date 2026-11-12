@@ -1,0 +1,51 @@
+substitutions:
+  _REGION: us-central1
+  _SERVICE: billing-assistant
+  _IMAGE: us-central1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/billing-assistant
+
+steps:
+  # 1. Install dev deps into a venv under /workspace (shared by later steps)
+  - id: install
+    name: python:3.13-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        python -m venv /workspace/.venv
+        /workspace/.venv/bin/pip install --no-cache-dir -r requirements-dev.txt
+
+  # 2. Unit tests: fast, no cloud calls
+  - id: unit-tests
+    name: python:3.13-slim
+    entrypoint: bash
+    args: ["-c", "/workspace/.venv/bin/python -m pytest billing_assistant/test_tools.py -q"]
+
+  # 3. Agent evals: real Gemini + BigQuery calls, run as cicd-sa
+  - id: agent-evals
+    name: python:3.13-slim
+    entrypoint: bash
+    env:
+      - GOOGLE_GENAI_USE_ENTERPRISE=True
+      - GOOGLE_CLOUD_PROJECT=${PROJECT_ID}
+      - GOOGLE_CLOUD_LOCATION=global
+    args: ["-c", "/workspace/.venv/bin/python -m pytest test_evals.py -v"]
+
+  # 4. Build the image, tagged with the commit
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_IMAGE}:${SHORT_SHA}", "."]
+
+  # 5. Push it
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_IMAGE}:${SHORT_SHA}"]
+
+  # 6. Deploy: only the image changes; SA, env vars, scaling and IAM stay as they are
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args: ["run", "deploy", "${_SERVICE}", "--image=${_IMAGE}:${SHORT_SHA}", "--region=${_REGION}"]
+
+options:
+  logging: CLOUD_LOGGING_ONLY   # required when the build runs as a custom service account
+timeout: 1800s

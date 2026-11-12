@@ -109,7 +109,7 @@ async def search_billing_docs(query: str) -> dict:
     }
 
 LATE_FEE_RATE = 0.05     # "up to 5% of the unpaid balance"  (docs/fees.md, Late payment fee)
-LATE_FEE_FLAT = 25.00   # "or a flat $10, whichever is greater"
+LATE_FEE_FLAT = 10.00    # "or a flat $10, whichever is greater"
 
 
 CITATION_URLS = {f"{c['doc']} — {c['section']}": c["source"] for c in INDEX}

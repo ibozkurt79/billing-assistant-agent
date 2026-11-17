@@ -43,12 +43,6 @@ resource "google_project_iam_member" "cicd_aiplatform_user" {
   role    = "roles/aiplatform.user"
 }
 
-# __generated__ by Terraform from "gen-lang-client-0223243806 roles/bigquery.dataViewer serviceAccount:billing-bot-sa@gen-lang-client-0223243806.iam.gserviceaccount.com"
-resource "google_project_iam_member" "billing_bot_bigquery_data_viewer" {
-  member  = google_service_account.billing_bot.member
-  project = var.project_id
-  role    = "roles/bigquery.dataViewer"
-}
 
 # __generated__ by Terraform from "gen-lang-client-0223243806 roles/run.developer serviceAccount:cicd-sa@gen-lang-client-0223243806.iam.gserviceaccount.com"
 resource "google_project_iam_member" "cicd_run_developer" {

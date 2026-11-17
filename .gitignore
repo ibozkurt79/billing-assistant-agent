@@ -14,3 +14,9 @@ __pycache__/
 
 # Old backup copies
 *_backup_*.py
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan

@@ -2,7 +2,7 @@
 
 A retrieval-augmented (RAG) customer-support agent that answers mobile billing questions — fees, Auto Pay, disputes, plan changes, taxes and surcharges — with cited answers. Built with Google ADK and Gemini, uses BigQuery vector search for retrieval, and runs on Cloud Run behind Firebase sign-in.
 
-> **Disclaimer:** This is a personal learning project and is not affiliated with, endorsed by, or connected to Verizon. The policy documents in `billing_assistant/docs/` are short summaries of public support pages written for practice; they may be out of date. Always check verizon.com for current terms.
+> **Disclaimer:** This is a personal project and is not affiliated with, endorsed by, or connected to Verizon. The policy documents in `billing_assistant/docs/` are short summaries of public support pages written for practice; they may be out of date. Always check verizon.com for current terms.
 
 ## What it does
 

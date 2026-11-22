@@ -109,3 +109,10 @@ resource "google_storage_bucket_iam_member" "terraform_state" {
   role   = "roles/storage.objectAdmin"
   member = google_service_account.terraform.member
 }
+
+# Runtime writes spans to Cloud Trace (L14)
+resource "google_project_iam_member" "billing_bot_cloudtrace_agent" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = google_service_account.billing_bot.member
+}

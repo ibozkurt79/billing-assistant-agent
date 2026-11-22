@@ -1,0 +1,3 @@
+# Local-only extras for labs (HNSW backend, ann_benchmark.py). Needs a C++ compiler to install.
+-r requirements.txt
+hnswlib==0.8.0

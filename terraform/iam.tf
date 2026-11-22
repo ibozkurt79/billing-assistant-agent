@@ -71,3 +71,41 @@ resource "google_project_iam_member" "cicd_log_writer" {
   project = var.project_id
   role    = "roles/logging.logWriter"
 }
+
+# --- terraform-sa: runs `terraform plan` in Cloud Build (read-only) ---
+resource "google_service_account" "terraform" {
+  account_id   = "terraform-sa"
+  display_name = "Terraform plan in CI (read-only)"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Read every resource Terraform manages
+resource "google_project_iam_member" "terraform_viewer" {
+  project = var.project_id
+  role    = "roles/viewer"
+  member  = google_service_account.terraform.member
+}
+
+# Read IAM policies (project, service accounts, datasets, repos) so plan can compare iam_member blocks
+resource "google_project_iam_member" "terraform_security_reviewer" {
+  project = var.project_id
+  role    = "roles/iam.securityReviewer"
+  member  = google_service_account.terraform.member
+}
+
+# Cloud Build with a user-specified service account must write its own logs
+resource "google_project_iam_member" "terraform_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = google_service_account.terraform.member
+}
+
+# State bucket: plan reads the state and creates/deletes a lock file
+resource "google_storage_bucket_iam_member" "terraform_state" {
+  bucket = "gen-lang-client-0223243806-tfstate"
+  role   = "roles/storage.objectAdmin"
+  member = google_service_account.terraform.member
+}

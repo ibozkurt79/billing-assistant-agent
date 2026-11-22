@@ -25,3 +25,22 @@ resource "google_cloudbuild_trigger" "deploy_main" {
     }
   }
 }
+
+# Infra pipeline: on push to main touching terraform/, run terraform plan as terraform-sa (read-only)
+resource "google_cloudbuild_trigger" "infra_main" {
+  project         = var.project_id
+  location        = var.region
+  name            = "infra-main"
+  filename        = "terraform/cloudbuild-infra.yaml"
+  service_account = google_service_account.terraform.id
+
+  # Only infrastructure changes start this pipeline (the mirror of deploy_main's ignored_files)
+  included_files = ["terraform/**"]
+
+  repository_event_config {
+    repository = local.github_repo
+    push {
+      branch = "^main$"
+    }
+  }
+}

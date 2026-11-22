@@ -1,0 +1,25 @@
+# Infra pipeline: runs on changes under terraform/. Plan only; apply stays manual.
+steps:
+  - id: init
+    name: hashicorp/terraform:1.17.2
+    dir: terraform
+    args: ["init", "-input=false", "-no-color"]
+
+  - id: fmt
+    name: hashicorp/terraform:1.17.2
+    dir: terraform
+    args: ["fmt", "-check", "-recursive", "-no-color"]
+
+  - id: validate
+    name: hashicorp/terraform:1.17.2
+    dir: terraform
+    args: ["validate", "-no-color"]
+
+  - id: plan
+    name: hashicorp/terraform:1.17.2
+    dir: terraform
+    args: ["plan", "-input=false", "-no-color", "-lock-timeout=120s"]
+
+options:
+  logging: CLOUD_LOGGING_ONLY   # required when a build runs as a user-specified service account
+timeout: 900s

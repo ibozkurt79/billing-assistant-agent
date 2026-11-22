@@ -40,3 +40,13 @@ resource "google_artifact_registry_repository_iam_member" "cicd_writer" {
   repository = google_artifact_registry_repository.cloud_run_images.name
   role       = "roles/artifactregistry.writer"
 }
+
+# Data Access audit logs (writes) for Artifact Registry, so cleanup dry runs are logged
+resource "google_project_iam_audit_config" "artifact_registry" {
+  project = var.project_id
+  service = "artifactregistry.googleapis.com"
+
+  audit_log_config {
+    log_type = "DATA_WRITE"
+  }
+}

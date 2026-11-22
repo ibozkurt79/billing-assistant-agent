@@ -38,6 +38,7 @@ def verify_token(token: str) -> dict:
 app = get_fast_api_app(
     agents_dir=BASE_DIR,
     web=False,
+    trace_to_cloud=os.environ.get("TRACE_TO_CLOUD", "true") == "true",  # spans -> Cloud Trace
 )
 
 @app.middleware("http")

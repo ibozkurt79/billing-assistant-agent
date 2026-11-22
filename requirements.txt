@@ -6,3 +6,4 @@ python-dotenv==1.2.4
 google-auth==2.62.0
 requests==2.34.2
 hnswlib==0.8.0
+opentelemetry-exporter-gcp-trace==1.15.0

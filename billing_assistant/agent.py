@@ -30,7 +30,9 @@ def get_client():
         _client = genai.Client()
     return _client
 
-VECTOR_BACKEND = os.environ.get("VECTOR_BACKEND", "bigquery")   # or "numpy"
+VECTOR_BACKEND = os.environ.get("VECTOR_BACKEND", "bigquery")   # "bigquery" (default), "numpy" (exact), or "hnsw" (approximate)
+if VECTOR_BACKEND not in ("bigquery", "numpy", "hnsw"):
+    raise ValueError(f"Unknown VECTOR_BACKEND={VECTOR_BACKEND!r}; use bigquery, numpy or hnsw")
 
 _bq = None
 
@@ -62,6 +64,28 @@ INDEX = json.loads((Path(__file__).parent / "index.json").read_text())
 VECTORS = np.array([c["embedding"] for c in INDEX])
 VECTORS = VECTORS / np.linalg.norm(VECTORS, axis=1, keepdims=True)   # unit length
 
+# ---------- Optional ANN index: VECTOR_BACKEND=hnsw ----------
+HNSW_EF = int(os.environ.get("HNSW_EF", "50"))   # search breadth: higher = better recall, slower
+
+
+def build_hnsw_index(vectors: np.ndarray):
+    """Build an in-memory HNSW graph over the chunk vectors (approximate nearest neighbors)."""
+    import hnswlib                                # imported only when this backend is used
+
+    index = hnswlib.Index(space="cosine", dim=vectors.shape[1])
+    index.init_index(
+        max_elements=len(vectors),
+        ef_construction=200,                      # build quality: higher = better graph, slower build
+        M=16,                                     # links per node: higher = better recall, more memory
+        random_seed=42,                           # reproducible graph
+    )
+    index.add_items(vectors, np.arange(len(vectors)))   # id i = position i in INDEX
+    index.set_ef(max(HNSW_EF, TOP_K))             # ef must be at least k
+    return index
+
+
+HNSW_INDEX = build_hnsw_index(VECTORS) if VECTOR_BACKEND == "hnsw" else None
+
 MODEL = Gemini(
     model="gemini-3.1-flash-lite",
     retry_options=types.HttpRetryOptions(attempts=5, initial_delay=2, max_delay=30),
@@ -90,7 +114,14 @@ async def search_billing_docs(query: str) -> dict:
             "score": round(1 - h["distance"], 3)}          # cosine similarity = 1 - distance
             for h in hits
             ]
-    else:                                                   # numpy fallback
+    elif VECTOR_BACKEND == "hnsw":                          # approximate: HNSW graph search
+        labels, distances = HNSW_INDEX.knn_query(np.array(q), k=TOP_K)
+        results = [
+            {**{key: INDEX[int(i)][key] for key in ("doc", "section", "source", "text")},
+             "score": round(1 - float(d), 3)}               # hnswlib returns cosine DISTANCE
+            for i, d in zip(labels[0], distances[0])
+        ]
+    else:                                                   # # numpy: exact brute-force cosine (baseline)
         qn = np.array(q) / np.linalg.norm(q)
         scores = VECTORS @ qn
         best = np.argsort(scores)[::-1][:TOP_K]

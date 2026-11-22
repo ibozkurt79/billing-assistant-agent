@@ -44,7 +44,8 @@ steps:
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: gcloud
-    args: ["run", "deploy", "${_SERVICE}", "--image=${_IMAGE}:${SHORT_SHA}", "--region=${_REGION}"]
+    args: ["run", "deploy", "${_SERVICE}", "--image=${_IMAGE}:${SHORT_SHA}", "--region=${_REGION}",
+           "--update-env-vars=OTEL_TRACES_SAMPLER=always_on"]
 
 options:
   logging: CLOUD_LOGGING_ONLY   # required when the build runs as a custom service account

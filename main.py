@@ -15,6 +15,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.cli.fast_api import get_fast_api_app
 
+import time
+from opentelemetry import trace as otel_trace
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
@@ -77,6 +80,54 @@ async def require_login(request: Request, call_next):
             return JSONResponse({"detail": "forbidden"}, status_code=403)
 
     return await call_next(request)
+
+@app.middleware("http")
+async def agent_turn_metrics(request: Request, call_next):
+    """One structured log line per /run_sse turn: TTFT, total time, agent error. Log-based metrics read it."""
+    if request.url.path != "/run_sse":
+        return await call_next(request)
+
+    start = time.monotonic()
+    span_ctx = otel_trace.get_current_span().get_span_context()
+    trace_id = f"{span_ctx.trace_id:032x}" if span_ctx.is_valid else None
+    response = await call_next(request)
+    body = response.body_iterator
+
+    async def timed_body():
+        first_text_ms, agent_error = None, response.status_code >= 400
+        try:
+            async for chunk in body:
+                text = chunk.decode("utf-8", "ignore") if isinstance(chunk, bytes) else chunk
+                for line in text.splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:])
+                    except ValueError:
+                        continue
+                    if "error" in event or "errorCode" in event:   # exception event, or model error event
+                        agent_error = True
+                    content = event.get("content") or {}
+                    if first_text_ms is None and content.get("role") == "model" and any(
+                        p.get("text") and not p.get("thought") for p in content.get("parts", [])
+                    ):
+                        first_text_ms = round((time.monotonic() - start) * 1000)
+                yield chunk
+        finally:
+            entry = {
+                "message": "agent_turn",
+                "severity": "ERROR" if agent_error else "INFO",
+                "ttft_ms": first_text_ms,
+                "total_ms": round((time.monotonic() - start) * 1000),
+                "agent_error": agent_error,
+                "status": response.status_code,
+            }
+            if trace_id:
+                entry["logging.googleapis.com/trace"] = f"projects/{PROJECT_ID}/traces/{trace_id}"
+            print(json.dumps(entry), flush=True)
+
+    response.body_iterator = timed_body()
+    return response
 
 # Our own additions on top of ADK's app
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

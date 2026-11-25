@@ -62,3 +62,84 @@ resource "google_logging_metric" "agent_turns" {
     }
   }
 }
+
+# --- SLOs (Lab 14 step 3) ---
+
+# A Monitoring "service" is just the container the SLOs hang on
+resource "google_monitoring_custom_service" "billing_assistant" {
+  project      = var.project_id
+  service_id   = "billing-assistant-agent"
+  display_name = "Billing assistant agent"
+}
+
+# 95% of turns show the first words within 4 s, over a rolling 7 days
+resource "google_monitoring_slo" "ttft" {
+  project             = var.project_id
+  service             = google_monitoring_custom_service.billing_assistant.service_id
+  slo_id              = "ttft-under-4s"
+  display_name        = "95% of turns show first words within 4 s (7 days)"
+  goal                = 0.95
+  rolling_period_days = 7
+
+  request_based_sli {
+    distribution_cut {
+      distribution_filter = "metric.type=\"logging.googleapis.com/user/billing_assistant/agent_ttft_ms\" resource.type=\"cloud_run_revision\""
+      range {
+        min = 0
+        max = 4000
+      }
+    }
+  }
+}
+
+# 99% of turns finish without an error event in the stream, over a rolling 7 days
+resource "google_monitoring_slo" "agent_success" {
+  project             = var.project_id
+  service             = google_monitoring_custom_service.billing_assistant.service_id
+  slo_id              = "agent-success-99"
+  display_name        = "99% of turns without an agent error (7 days)"
+  goal                = 0.99
+  rolling_period_days = 7
+
+  request_based_sli {
+    good_total_ratio {
+      good_service_filter  = "metric.type=\"logging.googleapis.com/user/billing_assistant/agent_turns\" resource.type=\"cloud_run_revision\" metric.label.agent_error=\"false\""
+      total_service_filter = "metric.type=\"logging.googleapis.com/user/billing_assistant/agent_turns\" resource.type=\"cloud_run_revision\""
+    }
+  }
+}
+
+# --- Burn-rate alert (Lab 14 step 3b) ---
+# Burn rate 10 on a 7-day SLO = the whole week's error budget gone in ~17 h
+resource "google_monitoring_alert_policy" "slo_burn" {
+  project      = var.project_id
+  display_name = "Billing assistant: SLO error budget burning fast"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "TTFT budget burning >10x (1 h window)"
+    condition_threshold {
+      filter          = "select_slo_burn_rate(\"${google_monitoring_slo.ttft.name}\", \"3600s\")"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 10
+      duration        = "0s"
+    }
+  }
+
+  conditions {
+    display_name = "Agent-error budget burning >10x (1 h window)"
+    condition_threshold {
+      filter          = "select_slo_burn_rate(\"${google_monitoring_slo.agent_success.name}\", \"3600s\")"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 10
+      duration        = "0s"
+    }
+  }
+
+  notification_channels = [var.alert_channel]
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = "Check Logs Explorer for `jsonPayload.message=\"agent_turn\"` in the last hour (slow `ttft_ms` or `agent_error=true`), then follow each line's trace link to see which span was slow or failed."
+  }
+}

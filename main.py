@@ -64,7 +64,10 @@ async def require_login(request: Request, call_next):
         return JSONResponse({"detail": "invalid or expired token"}, status_code=401)
 
     uid = claims["sub"]
-
+    # Absolute session limit: force a fresh sign-in 8 h after the password was entered,
+    # even if the browser keeps refreshing tokens
+    if time.time() - claims.get("auth_time", 0) > 2 * 3600:
+        return JSONResponse({"detail": "session expired, sign in again"}, status_code=401)
     # 3. Ownership: /apps/{app}/users/{userId}/... must be the caller's own uid
     m = USER_PATH.match(path)
     if m and m.group(1) != uid:
@@ -81,20 +84,31 @@ async def require_login(request: Request, call_next):
 
     return await call_next(request)
 
+MAX_TEXT = 8000   # cap chat text per log line (a Cloud Logging entry is limited to 256 KB)
+
 @app.middleware("http")
 async def agent_turn_metrics(request: Request, call_next):
-    """One structured log line per /run_sse turn: TTFT, total time, agent error. Log-based metrics read it."""
+    """One structured log line per /run_sse turn: timings, error flag, tools used, question and final answer."""
     if request.url.path != "/run_sse":
         return await call_next(request)
 
     start = time.monotonic()
     span_ctx = otel_trace.get_current_span().get_span_context()
     trace_id = f"{span_ctx.trace_id:032x}" if span_ctx.is_valid else None
+
+    try:
+        req = json.loads(await request.body() or b"{}")
+    except ValueError:
+        req = {}
+    new_message = req.get("newMessage") or req.get("new_message") or {}
+    question = "".join(p.get("text", "") for p in new_message.get("parts", []))
+
     response = await call_next(request)
     body = response.body_iterator
 
     async def timed_body():
-        first_text_ms, agent_error = None, response.status_code >= 400
+        first_text_ms, answer, tools = None, "", []
+        agent_error = response.status_code >= 400
         try:
             async for chunk in body:
                 text = chunk.decode("utf-8", "ignore") if isinstance(chunk, bytes) else chunk
@@ -108,10 +122,16 @@ async def agent_turn_metrics(request: Request, call_next):
                     if "error" in event or "errorCode" in event:   # exception event, or model error event
                         agent_error = True
                     content = event.get("content") or {}
-                    if first_text_ms is None and content.get("role") == "model" and any(
-                        p.get("text") and not p.get("thought") for p in content.get("parts", [])
-                    ):
+                    parts = content.get("parts", []) if content.get("role") == "model" else []
+                    texts = [p["text"] for p in parts if p.get("text") and not p.get("thought")]
+                    if texts and first_text_ms is None:
                         first_text_ms = round((time.monotonic() - start) * 1000)
+                    if texts and not event.get("partial"):
+                        answer = "".join(texts)          # last complete model message = the final answer
+                    for p in parts:
+                        name = (p.get("functionCall") or {}).get("name")
+                        if name and name not in tools:
+                            tools.append(name)
                 yield chunk
         finally:
             entry = {
@@ -121,6 +141,10 @@ async def agent_turn_metrics(request: Request, call_next):
                 "total_ms": round((time.monotonic() - start) * 1000),
                 "agent_error": agent_error,
                 "status": response.status_code,
+                "session_id": req.get("sessionId"),
+                "tools": tools,
+                "question": question[:MAX_TEXT],
+                "answer": answer[:MAX_TEXT],
             }
             if trace_id:
                 entry["logging.googleapis.com/trace"] = f"projects/{PROJECT_ID}/traces/{trace_id}"

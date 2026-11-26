@@ -143,3 +143,36 @@ resource "google_monitoring_alert_policy" "slo_burn" {
     content   = "Check Logs Explorer for `jsonPayload.message=\"agent_turn\"` in the last hour (slow `ttft_ms` or `agent_error=true`), then follow each line's trace link to see which span was slow or failed."
   }
 }
+
+# --- Chat logs to BigQuery (Lab 14 step 4) ---
+resource "google_bigquery_dataset" "chat_logs" {
+  project                         = var.project_id
+  dataset_id                      = "chat_logs"
+  location                        = "US"
+  description                     = "agent_turn log lines (question, answer, tools, timings, trace link) routed by a log sink"
+  default_partition_expiration_ms = 2592000000 # 30 days: chat text is customer data
+}
+
+# Routes every agent_turn line into the dataset (one partitioned table per log name)
+resource "google_logging_project_sink" "agent_turns_to_bq" {
+  project     = var.project_id
+  name        = "agent-turns-to-bigquery"
+  destination = "bigquery.googleapis.com/projects/${var.project_id}/datasets/${google_bigquery_dataset.chat_logs.dataset_id}"
+  filter      = <<-EOT
+    resource.type="cloud_run_revision"
+    resource.labels.service_name="billing-assistant"
+    jsonPayload.message="agent_turn"
+  EOT
+
+  bigquery_options {
+    use_partitioned_tables = true
+  }
+}
+
+# The sink writes as its own Google-managed service account; let it write to this dataset only
+resource "google_bigquery_dataset_iam_member" "chat_logs_sink_writer" {
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.chat_logs.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = google_logging_project_sink.agent_turns_to_bq.writer_identity
+}

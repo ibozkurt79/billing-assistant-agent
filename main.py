@@ -85,6 +85,7 @@ async def require_login(request: Request, call_next):
     return await call_next(request)
 
 MAX_TEXT = 8000   # cap chat text per log line (a Cloud Logging entry is limited to 256 KB)
+MAX_TOOL_RESULT = 6000   # cap each tool result (JSON text) in the log line
 
 @app.middleware("http")
 async def agent_turn_metrics(request: Request, call_next):
@@ -107,7 +108,7 @@ async def agent_turn_metrics(request: Request, call_next):
     body = response.body_iterator
 
     async def timed_body():
-        first_text_ms, answer, tools = None, "", []
+        first_text_ms, answer, tools, tool_results = None, "", [], []
         agent_error = response.status_code >= 400
         try:
             async for chunk in body:
@@ -132,6 +133,13 @@ async def agent_turn_metrics(request: Request, call_next):
                         name = (p.get("functionCall") or {}).get("name")
                         if name and name not in tools:
                             tools.append(name)
+                    for p in content.get("parts") or []:           # tool results arrive as user-role events
+                        fr = p.get("functionResponse")
+                        if fr:
+                            tool_results.append({
+                                "name": fr.get("name"),
+                                "response_json": json.dumps(fr.get("response"), default=str)[:MAX_TOOL_RESULT],
+                            })
                 yield chunk
         finally:
             entry = {
@@ -143,6 +151,7 @@ async def agent_turn_metrics(request: Request, call_next):
                 "status": response.status_code,
                 "session_id": req.get("sessionId"),
                 "tools": tools,
+                "tool_results": tool_results,
                 "question": question[:MAX_TEXT],
                 "answer": answer[:MAX_TEXT],
             }
